@@ -27,8 +27,10 @@ fn main() -> Result<(), BacktestError> {
 
     println!("Walk-forward analysis");
     println!("---------------------");
-    println!("{:>5} {:>11} {:>11} {:>10} {:>10}",
-        "fold", "is_start", "oos_start", "is_sharpe", "oos_sharpe");
+    println!(
+        "{:>5} {:>11} {:>11} {:>10} {:>10}",
+        "fold", "is_start", "oos_start", "is_sharpe", "oos_sharpe"
+    );
     for fold in &result.folds {
         println!(
             "{:>5} {:>11} {:>11} {:>10.2} {:>10.2}",
@@ -42,8 +44,14 @@ fn main() -> Result<(), BacktestError> {
 
     println!();
     println!("Stitched OOS Sharpe : {:.2}", result.aggregate_oos.sharpe);
-    println!("Stitched OOS return : {:.2}%", result.aggregate_oos.total_return * 100.0);
-    println!("Stitched OOS max DD : {:.2}%", result.aggregate_oos.max_drawdown * 100.0);
+    println!(
+        "Stitched OOS return : {:.2}%",
+        result.aggregate_oos.total_return * 100.0
+    );
+    println!(
+        "Stitched OOS max DD : {:.2}%",
+        result.aggregate_oos.max_drawdown * 100.0
+    );
     Ok(())
 }
 

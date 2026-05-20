@@ -56,8 +56,8 @@ pub mod prelude {
         NoFunding, PerpetualFunding, SimulatedExecutionHandler, SlippageModel, SquareRootSlippage,
         ZeroSlippage,
     };
-    pub use crate::metrics::PerformanceMetrics;
-    pub use crate::portfolio::{Portfolio, Position};
+    pub use crate::metrics::{PerformanceMetrics, TradeStats};
+    pub use crate::portfolio::{Portfolio, Position, Trade};
     pub use crate::strategy::{MovingAverageCrossover, Strategy};
     pub use crate::types::{OrderSide, OrderType, Price, Quantity, Side, Symbol, Timestamp};
     pub use crate::walkforward::{WalkForward, WalkForwardResult, WindowMode};

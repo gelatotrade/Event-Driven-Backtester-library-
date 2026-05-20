@@ -6,3 +6,7 @@ Cargo.lock
 .idea/
 .vscode/
 *.iml
+
+# Example output artifacts
+*_equity.csv
+*_trades.csv

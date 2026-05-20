@@ -1,27 +1,55 @@
 //! Main backtest engine — drives the event loop.
 
-use std::collections::VecDeque;
+use std::path::Path;
 
 use crate::data::DataHandler;
 use crate::error::BacktestError;
-use crate::events::{Event, MarketEvent};
+use crate::events::{MarketEvent, OrderEvent};
 use crate::execution::{
     ExecutionHandler, FeeModel, FundingModel, SimulatedExecutionHandler, SlippageModel,
 };
-use crate::metrics::PerformanceMetrics;
-use crate::portfolio::{EquityPoint, Portfolio};
+use crate::metrics::{PerformanceMetrics, TradeStats};
+use crate::portfolio::{EquityPoint, Portfolio, Trade};
 use crate::strategy::Strategy;
 
 /// Output of a backtest run.
 #[derive(Debug, Clone)]
 pub struct BacktestResult {
     pub metrics: PerformanceMetrics,
+    pub trade_stats: TradeStats,
     pub equity_curve: Vec<EquityPoint>,
+    pub trades: Vec<Trade>,
     pub realized_pnl: f64,
     pub total_fees: f64,
     pub total_funding: f64,
+    pub total_borrow: f64,
     pub total_slippage: f64,
-    pub trade_count: usize,
+    /// Number of executed fills.
+    pub fills: usize,
+    /// True if the account was force-liquidated during the run.
+    pub liquidated: bool,
+}
+
+impl BacktestResult {
+    /// Write the round-trip trade log to a CSV file.
+    pub fn write_trades_csv(&self, path: impl AsRef<Path>) -> Result<(), BacktestError> {
+        let mut wtr = csv::Writer::from_path(path)?;
+        for trade in &self.trades {
+            wtr.serialize(trade)?;
+        }
+        wtr.flush()?;
+        Ok(())
+    }
+
+    /// Write the equity curve to a CSV file.
+    pub fn write_equity_csv(&self, path: impl AsRef<Path>) -> Result<(), BacktestError> {
+        let mut wtr = csv::Writer::from_path(path)?;
+        for point in &self.equity_curve {
+            wtr.serialize(point)?;
+        }
+        wtr.flush()?;
+        Ok(())
+    }
 }
 
 pub struct BacktestEngine<D, S, SL, FE, FU>
@@ -74,65 +102,81 @@ where
     }
 
     /// Execute the backtest end-to-end.
+    ///
+    /// Orders are filled on the **next** bar of their symbol, at that bar's
+    /// open, so a signal computed from bar T's close never executes at a
+    /// price from bar T or earlier — this is what keeps the simulation free
+    /// of look-ahead bias.
     pub fn run(&mut self) -> Result<BacktestResult, BacktestError> {
-        let mut queue: VecDeque<Event> = VecDeque::new();
+        let mut pending: Vec<OrderEvent> = Vec::new();
 
         while let Some(market) = self.data.next() {
-            self.handle_market(&market);
-            queue.push_back(Event::Market(market));
+            let sym = market.bar.symbol.clone();
 
-            while let Some(event) = queue.pop_front() {
-                match event {
-                    Event::Market(m) => {
-                        let signals = self.strategy.on_market(&m, &self.data);
-                        for sig in signals {
-                            queue.push_back(Event::Signal(sig));
-                        }
+            // Phase 1: fill orders queued on the previous bar of this symbol,
+            // at the current bar's open.
+            let mut i = 0;
+            while i < pending.len() {
+                if pending[i].symbol == sym {
+                    let order = pending.remove(i);
+                    match self.execution.execute(&order, &market.bar) {
+                        Ok(fill) => self.portfolio.on_fill(&fill),
+                        // A limit order that wasn't triggered this bar expires.
+                        Err(BacktestError::InvalidOrder(_)) => {}
+                        Err(e) => return Err(e),
                     }
-                    Event::Signal(sig) => {
-                        if let Some(order) = self.portfolio.on_signal(&sig, &self.data)? {
-                            queue.push_back(Event::Order(order));
-                        }
-                    }
-                    Event::Order(order) => {
-                        let bar = self
-                            .data
-                            .current_bar(&order.symbol)
-                            .ok_or_else(|| BacktestError::UnknownSymbol(order.symbol.clone()))?
-                            .clone();
-                        match self.execution.execute(&order, &bar) {
-                            Ok(fill) => queue.push_back(Event::Fill(fill)),
-                            Err(BacktestError::InvalidOrder(_)) => continue,
-                            Err(e) => return Err(e),
-                        }
-                    }
-                    Event::Fill(fill) => {
-                        self.portfolio.on_fill(&fill);
+                } else {
+                    i += 1;
+                }
+            }
+
+            // Phase 2: funding + borrow + mark-to-market at the bar close.
+            self.handle_market(&market);
+
+            // Phase 3: liquidation check after marking to market.
+            self.portfolio.check_and_liquidate(market.timestamp);
+
+            // Phase 4: snapshot equity for this bar (post-fill, post-liquidation).
+            self.portfolio.snapshot_equity(market.timestamp);
+
+            // Phase 5: strategy generates signals -> orders queued for the next bar.
+            if !self.portfolio.is_liquidated() {
+                let signals = self.strategy.on_market(&market, &self.data);
+                for sig in signals {
+                    if let Some(order) = self.portfolio.on_signal(&sig, &self.data)? {
+                        pending.push(order);
                     }
                 }
             }
         }
 
         let curve = self.portfolio.equity_curve().to_vec();
+        let trades = self.portfolio.trades().to_vec();
         let metrics = PerformanceMetrics::from_curve(&curve, self.periods_per_year);
+        let trade_stats = TradeStats::from_trades(&trades);
 
         Ok(BacktestResult {
             metrics,
+            trade_stats,
             equity_curve: curve,
+            trades,
             realized_pnl: self.portfolio.realized_pnl(),
             total_fees: self.portfolio.total_fees(),
             total_funding: self.portfolio.total_funding(),
+            total_borrow: self.portfolio.total_borrow(),
             total_slippage: self.portfolio.total_slippage(),
-            trade_count: self.portfolio.trade_count(),
+            fills: self.portfolio.fills(),
+            liquidated: self.portfolio.is_liquidated(),
         })
     }
 
     fn handle_market(&mut self, market: &MarketEvent) {
         self.portfolio
-            .mark_to_market(market.timestamp, &market.bar.symbol, market.bar.close);
+            .update_mark(&market.bar.symbol, market.bar.close);
 
         if let Some(rate) = self.execution.funding_for(&market.bar) {
             self.portfolio.apply_funding(&market.bar.symbol, rate);
         }
+        self.portfolio.apply_borrow_cost(self.periods_per_year);
     }
 }
