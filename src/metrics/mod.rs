@@ -1,6 +1,11 @@
-//! Risk and performance metrics computed from an equity curve.
+//! Risk and performance metrics.
+//!
+//! [`PerformanceMetrics`] are derived from the equity curve (return/risk
+//! statistics). [`TradeStats`] are derived from the round-trip trade log
+//! (win rate, profit factor, etc.) — these are genuinely per-trade, not
+//! per-bar.
 
-use crate::portfolio::EquityPoint;
+use crate::portfolio::{EquityPoint, Trade};
 
 const TRADING_DAYS_PER_YEAR: f64 = 365.0;
 
@@ -14,8 +19,6 @@ pub struct PerformanceMetrics {
     pub calmar: f64,
     pub max_drawdown: f64,
     pub max_drawdown_duration: usize,
-    pub profit_factor: f64,
-    pub win_rate: f64,
     pub num_periods: usize,
     pub final_equity: f64,
 }
@@ -48,11 +51,8 @@ impl PerformanceMetrics {
         };
 
         let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-        let variance = returns
-            .iter()
-            .map(|r| (r - mean).powi(2))
-            .sum::<f64>()
-            / returns.len() as f64;
+        let variance =
+            returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
         let std_dev = variance.sqrt();
 
         let downside_var = returns
@@ -83,24 +83,6 @@ impl PerformanceMetrics {
             0.0
         };
 
-        let gains: f64 = returns.iter().filter(|r| **r > 0.0).sum();
-        let losses: f64 = returns.iter().filter(|r| **r < 0.0).map(|r| r.abs()).sum();
-        let profit_factor = if losses > 0.0 {
-            gains / losses
-        } else if gains > 0.0 {
-            f64::INFINITY
-        } else {
-            0.0
-        };
-
-        let wins = returns.iter().filter(|r| **r > 0.0).count();
-        let non_zero = returns.iter().filter(|r| r.abs() > 1e-12).count();
-        let win_rate = if non_zero > 0 {
-            wins as f64 / non_zero as f64
-        } else {
-            0.0
-        };
-
         Self {
             total_return,
             annualized_return,
@@ -110,8 +92,6 @@ impl PerformanceMetrics {
             calmar,
             max_drawdown,
             max_drawdown_duration,
-            profit_factor,
-            win_rate,
             num_periods: returns.len(),
             final_equity: final_eq,
         }
@@ -131,10 +111,88 @@ impl PerformanceMetrics {
             calmar: 0.0,
             max_drawdown: 0.0,
             max_drawdown_duration: 0,
-            profit_factor: 0.0,
-            win_rate: 0.0,
             num_periods: 0,
             final_equity,
+        }
+    }
+}
+
+/// Per-trade statistics computed from the round-trip trade log.
+#[derive(Debug, Clone, Copy)]
+pub struct TradeStats {
+    pub num_trades: usize,
+    pub win_rate: f64,
+    pub profit_factor: f64,
+    pub avg_trade_pnl: f64,
+    pub avg_win: f64,
+    pub avg_loss: f64,
+    pub largest_win: f64,
+    pub largest_loss: f64,
+    pub gross_profit: f64,
+    pub gross_loss: f64,
+}
+
+impl TradeStats {
+    pub fn from_trades(trades: &[Trade]) -> Self {
+        if trades.is_empty() {
+            return Self::empty();
+        }
+
+        let num_trades = trades.len();
+        let wins: Vec<f64> = trades.iter().map(|t| t.pnl).filter(|p| *p > 0.0).collect();
+        let losses: Vec<f64> = trades.iter().map(|t| t.pnl).filter(|p| *p < 0.0).collect();
+
+        let gross_profit: f64 = wins.iter().sum();
+        let gross_loss: f64 = losses.iter().map(|l| l.abs()).sum();
+        let total_pnl: f64 = trades.iter().map(|t| t.pnl).sum();
+
+        let win_rate = wins.len() as f64 / num_trades as f64;
+        let profit_factor = if gross_loss > 0.0 {
+            gross_profit / gross_loss
+        } else if gross_profit > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        let avg_win = if wins.is_empty() {
+            0.0
+        } else {
+            gross_profit / wins.len() as f64
+        };
+        let avg_loss = if losses.is_empty() {
+            0.0
+        } else {
+            gross_loss / losses.len() as f64
+        };
+        let largest_win = wins.iter().cloned().fold(0.0, f64::max);
+        let largest_loss = losses.iter().cloned().fold(0.0, f64::min);
+
+        Self {
+            num_trades,
+            win_rate,
+            profit_factor,
+            avg_trade_pnl: total_pnl / num_trades as f64,
+            avg_win,
+            avg_loss,
+            largest_win,
+            largest_loss,
+            gross_profit,
+            gross_loss,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            num_trades: 0,
+            win_rate: 0.0,
+            profit_factor: 0.0,
+            avg_trade_pnl: 0.0,
+            avg_win: 0.0,
+            avg_loss: 0.0,
+            largest_win: 0.0,
+            largest_loss: 0.0,
+            gross_profit: 0.0,
+            gross_loss: 0.0,
         }
     }
 }

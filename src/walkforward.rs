@@ -5,8 +5,8 @@
 use chrono::{DateTime, Duration, Utc};
 
 use crate::data::{Bar, InMemoryDataHandler};
-use crate::error::BacktestError;
 use crate::engine::{BacktestEngine, BacktestResult};
+use crate::error::BacktestError;
 use crate::execution::{FeeModel, FundingModel, SimulatedExecutionHandler, SlippageModel};
 use crate::metrics::PerformanceMetrics;
 use crate::portfolio::Portfolio;

@@ -18,20 +18,30 @@ FillEvent    ->  Portfolio
 
 Same strategy code, same data path, same fill semantics — historical or live.
 
+**No look-ahead by construction.** A signal computed from bar `T`'s close is
+filled on the *next* bar of that symbol, at its open. The engine never lets an
+order execute at a price from the same bar (or earlier) that produced the
+signal — the single most common way a backtester lies to you.
+
 ## Feature overview
 
 - **Pluggable components** behind traits: `DataHandler`, `Strategy`,
   `ExecutionHandler`, `SlippageModel`, `FeeModel`, `FundingModel`.
+- **Next-bar-open execution** so the simulation is free of look-ahead bias.
 - **Realistic execution**: market + limit orders, maker/taker fees,
   linear and square-root slippage, perpetual funding.
-- **Portfolio engine**: long/short positions, leverage cap, risk-per-trade
-  sizing, realized vs unrealized PnL, full equity curve.
+- **Portfolio engine**: long/short positions, gross-leverage cap,
+  risk-per-trade sizing, realized vs unrealized PnL, full equity curve.
+- **Margin & risk**: maintenance-margin liquidation, short borrow/financing
+  cost, configurable liquidation penalty.
 - **Walk-forward analysis** with rolling or expanding in-sample windows
   and stitched OOS metrics.
-- **Performance metrics**: Sharpe, Sortino, Calmar, max drawdown
-  (depth + duration), profit factor, win rate, total/annualized return.
-- **CSV ingestion** (RFC3339 or unix-ms timestamps) plus an in-memory
-  source for tests and synthetic data.
+- **Curve metrics**: Sharpe, Sortino, Calmar, max drawdown (depth + duration),
+  total/annualized return and volatility.
+- **Trade metrics** (genuinely per round-trip, not per-bar): win rate,
+  profit factor, average win/loss, largest win/loss.
+- **CSV ingestion** (RFC3339 or unix-ms timestamps) and **CSV export** of the
+  trade log and equity curve; in-memory source for tests and synthetic data.
 - **Zero `unsafe`**, MIT licensed, no async runtime required.
 
 ## Install
@@ -61,12 +71,20 @@ fn main() -> Result<(), BacktestError> {
     let mut engine = BacktestEngine::new(data, strategy, portfolio, execution);
     let result = engine.run()?;
 
-    println!("Sharpe   : {:.2}", result.metrics.sharpe);
-    println!("Max DD   : {:.2}%", result.metrics.max_drawdown * 100.0);
-    println!("Trades   : {}", result.trade_count);
+    println!("Sharpe      : {:.2}", result.metrics.sharpe);
+    println!("Max DD      : {:.2}%", result.metrics.max_drawdown * 100.0);
+    println!("Win rate    : {:.1}%", result.trade_stats.win_rate * 100.0);
+    println!("Trades      : {}", result.trade_stats.num_trades);
+    println!("Liquidated  : {}", result.liquidated);
+
+    result.write_trades_csv("trades.csv")?;
+    result.write_equity_csv("equity.csv")?;
     Ok(())
 }
 ```
+
+`result.metrics` holds the equity-curve statistics; `result.trade_stats` holds
+the per-trade statistics; `result.trades` is the full round-trip blotter.
 
 ### CSV format
 
@@ -141,6 +159,40 @@ basis-point floor for thin or zero-volume bars.
 the payment to the open notional — longs pay when the rate is positive,
 shorts pay when negative.
 
+## Costs, margin & liquidation
+
+The portfolio enforces a gross-leverage cap across **all** symbols (not per
+order), and optionally models margin and financing:
+
+```rust
+let portfolio = Portfolio::new(100_000.0)
+    .with_risk_per_trade(0.75)        // allocate up to 75% of equity per signal
+    .with_max_leverage(3.0)           // total gross notional <= 3x equity
+    .with_maintenance_margin(0.005)   // liquidate below 0.5% maintenance margin
+    .with_annual_borrow_rate(0.10)    // 10% p.a. financing on short notional
+    .with_liquidation_fee(0.005);     // 50 bps penalty when liquidated
+```
+
+- **Leverage cap**: each new order is sized so that this symbol's notional plus
+  every other open position stays within `max_leverage * equity`.
+- **Liquidation**: after each bar is marked to market, if
+  `equity < maintenance_margin_rate * gross_notional` the book is force-flattened
+  at the current mark (plus the liquidation fee) and `result.liquidated` is set.
+  No further trades are taken. Disabled when the rate is `0.0` (the default).
+- **Borrow cost**: short notional is charged `annual_borrow_rate / periods_per_year`
+  each bar, surfaced as `result.total_borrow`. Disabled when `0.0`.
+
+## Results & export
+
+`BacktestResult` carries the equity curve, the full trade blotter, aggregate
+cost accounting (`total_fees`, `total_funding`, `total_borrow`, `total_slippage`)
+and both metric structs. Persist the artifacts for downstream analysis:
+
+```rust
+result.write_trades_csv("trades.csv")?;   // one row per round-trip trade
+result.write_equity_csv("equity.csv")?;   // timestamp, equity, cash, position_value
+```
+
 ## Walk-forward analysis
 
 ```rust
@@ -190,21 +242,30 @@ src/
 ├── walkforward.rs      # rolling / expanding walk-forward
 ├── data/               # DataHandler trait, CSV + in-memory sources
 ├── strategy/           # Strategy trait + MA crossover reference
-├── portfolio/          # positions, sizing, equity curve
+├── portfolio/          # positions, trades, sizing, margin, equity curve
 ├── execution/          # simulated handler, slippage / fee / funding models
-└── metrics/            # Sharpe / Sortino / Calmar / max-DD / win rate
+└── metrics/            # curve metrics (Sharpe/Sortino/Calmar/DD) + trade stats
 ```
 
 ## Status
 
-This crate is the engine layer for downstream strategy repos. The Phase 1
-goals — event loop, realistic costs, walk-forward, metrics — are in place
-and covered by integration tests. Phase 2 candidates:
+This crate is the engine layer for downstream strategy repos. In place and
+covered by integration tests:
 
-- Multi-asset portfolio with cross-asset position netting
-- Limit-order book simulation for higher-frequency strategies
+- Event loop with **next-bar-open execution** (no look-ahead)
+- Realistic costs: slippage, maker/taker fees, perpetual funding, short borrow
+- Margin model with maintenance-margin liquidation and gross-leverage cap
+- Round-trip trade blotter with per-trade metrics; CSV export
+- Walk-forward (rolling / expanding) with stitched OOS metrics
+- CI: `fmt` + `clippy -D warnings` + tests + examples on every push/PR
+
+Phase 2 candidates:
+
+- Multi-asset equity accounting on a single shared clock (today one equity
+  point is recorded per incoming bar, which is exact for single-symbol runs)
+- Limit-order book simulation with queue position for higher-frequency strategies
 - Parallel walk-forward and parameter-grid search
-- Pluggable risk-management overlays (max-drawdown stops, vol targeting)
+- Vol-targeting / drawdown-stop risk overlays
 - Live trading adapter (Binance / Hyperliquid) reusing the same traits
 
 ## License

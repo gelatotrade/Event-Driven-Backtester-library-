@@ -12,7 +12,10 @@ fn main() -> Result<(), BacktestError> {
     let strategy = MovingAverageCrossover::new("ETHPERP", 20, 60);
     let portfolio = Portfolio::new(100_000.0)
         .with_risk_per_trade(0.75)
-        .with_max_leverage(3.0);
+        .with_max_leverage(3.0)
+        .with_maintenance_margin(0.005) // liquidate below 0.5% maintenance margin
+        .with_annual_borrow_rate(0.10) // 10% p.a. financing on shorts
+        .with_liquidation_fee(0.005); // 50 bps penalty if liquidated
     let execution = SimulatedExecutionHandler::new(
         SquareRootSlippage::new(0.5, 0.0001),
         MakerTakerFees::new(0.0001, 0.0004),
@@ -31,11 +34,16 @@ fn main() -> Result<(), BacktestError> {
 
     println!("ETHPERP funding-aware backtest");
     println!("------------------------------");
-    println!("Final equity     : {:>12.2}", result.metrics.final_equity);
-    println!("Sharpe           : {:>12.2}", result.metrics.sharpe);
-    println!("Max drawdown     : {:>12.2}%", result.metrics.max_drawdown * 100.0);
+    println!("Final equity      : {:>12.2}", result.metrics.final_equity);
+    println!("Sharpe            : {:>12.2}", result.metrics.sharpe);
+    println!(
+        "Max drawdown      : {:>12.2}%",
+        result.metrics.max_drawdown * 100.0
+    );
     println!("Total funding paid: {:>12.2}", result.total_funding);
-    println!("Trades           : {:>12}", result.trade_count);
+    println!("Total borrow cost : {:>12.2}", result.total_borrow);
+    println!("Round-trip trades : {:>12}", result.trade_stats.num_trades);
+    println!("Liquidated        : {:>12}", result.liquidated);
     Ok(())
 }
 
